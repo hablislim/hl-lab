@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hyperliquid-node
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/hablislim/hl-lab.git
+    path: charts/hyperliquid-node
+    targetRevision: main
+    helm:
+      # PS: I've configured ArgoCD to reference the target values.yaml file directly, keeping the ArgoCD application definition clean and allowing more frequent, version-controlled updates on the source chart side.
+      valueFiles:
+        - values.yaml
+    server: https://kubernetes.default.svc
+    namespace: hyperliquid
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

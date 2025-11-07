@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hl-gossip-overrides
+  labels:
+    app.kubernetes.io/name: hyperliquid-node
+    app.kubernetes.io/component: gossip
+data:
+  override_gossip_config.json: |
+      {
+        "root_node_ips": [
+          {
+            "Ip": "1.2.3.4"
+          }
+        ],
+        "try_new_peers": false,
+        "chain": "Mainnet",
+        "reserved_peer_ips": [
+          "5.6.7.8"
+        ]
+      }

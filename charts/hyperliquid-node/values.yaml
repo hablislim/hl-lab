@@ -1,0 +1,224 @@
+controllers:
+  main:
+    type: statefulset
+    replicas: 2 # one per AZ
+    strategy: RollingUpdate
+    podManagementPolicy: OrderedReady
+
+    serviceAccount:
+      create: true
+      name: hyperliquid-node
+      automountServiceAccountToken: false
+
+    pod:
+      serviceAccountName: hyperliquid-node
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 10000
+        runAsGroup: 10000
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    # Pin to Tokyo
+                    values: ["ap-northeast-1"]           
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    # All available AZs in case of AZ failover
+                    values: ["ap-northeast-1a", "ap-northeast-1b", "ap-northeast-1c", "ap-northeast-1d"]  
+        podAntiAffinity:
+          # Keep replicas off the same node
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values: ["hyperliquid-node"]
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        # Balance across zones for consistent latency and failure isolation
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hyperliquid-node
+
+    containers:
+      # ---- Main node ----
+      main:
+        image:
+          repository: AneraLabs-registry.io/hl-node
+          tag: v0.1.0@sha256:xxxxxxxxxxx
+          pullPolicy: IfNotPresent
+        command: ["/opt/hl/bin/hl-visor"]
+        args:
+          - run-non-validator
+          - --serve-info
+          - --stream-with-block-info # Helps process events more immediately with full block metadata  
+          - --disable-output-file-buffering # Minimises flush latency to disk
+          - --write-order-statuses # Useful for monitoring every order/status for high precision
+          - --serve-eth-rpc # if trading infrastructure needs direct RPC access to the node.
+        ports:
+          - name: p2p1
+            containerPort: 4001
+          - name: p2p2
+            containerPort: 4002
+          - name: info
+            containerPort: 3001
+        securityContext:
+          allowPrivilegeEscalation: false
+   
+
+        # Guaranteed QoS (requests == limits)
+        resources:
+          requests: { cpu: "16", memory: "64Gi" }
+          limits:   { cpu: "16", memory: "64Gi" }
+
+        probes:
+          liveness:
+            enabled: true
+            type: TCP
+            spec:
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              failureThreshold: 3
+              timeoutSeconds: 1
+          readiness:
+            enabled: true
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            type: TCP
+            spec:
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              failureThreshold: 3
+              timeoutSeconds: 1
+          startup:
+            enabled: true
+            type: TCP
+            spec:
+              initialDelaySeconds: 30
+              periodSeconds: 10
+              failureThreshold: 6
+              timeoutSeconds: 1
+
+      # Blackbox TCP probe sidecar to measure peer connect time
+      # Requires a Prometheus (Operator) PodMonitor/Probe to scrape it
+      tcp-prober:
+        image:
+          repository: prom/blackbox-exporter
+          tag: v0.27.0@sha256:a50c4c0eda297baa1678cd4dc4712a67fdea713b832d43ce7fcc5f9bea05094d
+          pullPolicy: IfNotPresent
+        args: ["--config.file=/etc/blackbox/blackbox.yml"]
+        ports:
+          - name: metrics
+            containerPort: 9115
+
+service:
+  p2p:
+    primary: true
+    controller: main
+    type: LoadBalancer
+    externalTrafficPolicy: Local   # preserve source IP & avoid extra hop
+    ports:
+      p2p1: { port: 4001, targetPort: 4001, protocol: TCP }
+      p2p2: { port: 4002, targetPort: 4002, protocol: TCP }
+
+  rpc:
+    controller: main
+    type: ClusterIP
+    ports:
+      info: { port: 3001, targetPort: 3001, protocol: TCP }
+
+  # Metrics for blackbox sidecar (cluster-internal)
+  metrics:
+    controller: main
+    enabled: true
+    type: ClusterIP
+    ports:
+      metrics: { port: 9115, targetPort: 9115 }
+
+persistence:
+  # High-IOPS storage for logs/state
+  data:
+    enabled: true
+    type: persistentVolumeClaim
+    accessMode: ReadWriteOnce
+    size: 2Ti # as we have around 100Gb logs per day (in case of we have an issue with archiving/clean up)
+    retain: true
+    storageClass: fast-local-ssd   # set to your fast SSD/NVMe class
+    advancedMounts:
+      main:
+        main:
+          - path: /opt/hl/data
+            readOnly: false
+
+  visor:
+    enabled: true
+    type: configMap
+    name: hl-visor-config
+    advancedMounts:
+      main:
+        main:
+          - path: /opt/hl/config
+            subPath: visor.json
+            readOnly: true
+  gossip:
+    enabled: true
+    type: configMap
+    name: hl-gossip-overrides
+    advancedMounts:
+      main:
+        main:
+          - path: /opt/hl/config
+            subPath: override_gossip_config.json
+            readOnly: true
+
+  bb-config:
+    enabled: true
+    type: configMap
+    name: hl-blackbox-config
+    advancedMounts:
+      main:
+        tcp-prober:
+          - path: /etc/blackbox
+            subPath: blackbox.yml
+            readOnly: true
+
+# Expose only required P2P ports
+networkpolicies:
+  deny-all:
+    enabled: true
+    podSelector: { }
+    policyTypes: ["Ingress","Egress"]
+    rules:
+      ingress: {}
+      egress: {}
+  main:
+    enabled: true
+    podSelector: { app.kubernetes.io/name: hyperliquid-node, app.kubernetes.io/mode: non-validator }
+    policyTypes: ["Ingress","Egress"]
+    rules:
+      ingress:
+        - ports:
+            - port: 3001 # An enhancement: allow RPC/info port only from internal subnets
+              protocol: TCP
+            - port: 4001
+              protocol: TCP
+            - port: 4002
+              protocol: TCP
+      egress:
+        - {}  # Tighten if we pin known peers
+
+# Common labels for selectors/affinity
+defaultPodOptions:
+  labels:
+    app.kubernetes.io/name: hyperliquid-node
+    app.kubernetes.io/mode: non-validator

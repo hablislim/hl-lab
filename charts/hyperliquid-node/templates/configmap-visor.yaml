@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hl-visor-config
+  labels:
+    app.kubernetes.io/name: hyperliquid-node
+    app.kubernetes.io/component: visor
+data:
+  visor.json: |
+    {
+      "chain": "Mainnet"
+    }
