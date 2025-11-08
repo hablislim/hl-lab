@@ -40,6 +40,7 @@ Each pod gets a 2Tb `gp3` volume (`statefulset.volumeClaimTemplates`). Increase 
 - Ensure EKS service controller creates NLB (not ALB) (service.beta.kubernetes.io/aws-load-balancer-type: "nlb")
 - Run worker nodes on ENA-enabled high-network-performance instances (e.g., c6i, m6i, r6i, c7i)
 - Keep pods on the same region; cross-AZ adds latency (trade-off vs resilience)
+- Enable autoscaling across all Availability Zones (AZs) to ensure that if one or two AZs become unavailable, new nodes can automatically be launched in the remaining healthy zones.
 - Place nodes in a cluster placement group (same rack / network switch) for lower inter-AZ latency trade-offs 
 - Bonus:
         
